@@ -12,6 +12,8 @@
 (define-constant ERR-PURCHASE-FAILED (err u107))
 (define-constant ERR-CONTRACT-LOCKED (err u108))
 (define-constant ERR-EMPTY-LIST (err u109))
+(define-constant ERR-INVALID-PARAM (err u110))
+(define-constant ERR-INVALID-NAME (err u111))
 
 ;; Data structures
 (define-map items
@@ -46,40 +48,70 @@
 (define-data-var total-revenue uint u0)
 (define-data-var purchase-count uint u0)
 
+;; Helper functions for input validation
+(define-private (is-valid-item-id (id uint))
+  (and (> id u0) (< id (var-get next-item-id)))
+)
+
+(define-private (is-valid-quantity (qty uint))
+  (and (> qty u0) (< qty u1000000)) ;; Set a reasonable upper limit
+)
+
+(define-private (is-valid-price (price uint))
+  (and (> price u0) (< price u1000000000)) ;; Set a reasonable upper limit
+)
+
+(define-private (is-valid-discount (discount uint))
+  (<= discount u100)
+)
+
+(define-private (is-valid-name (name (string-ascii 64)))
+  (and (> (len name) u0) (<= (len name) u64))
+)
+
 ;; Read-only functions
 (define-read-only (get-item (item-id uint))
-  (map-get? items { item-id: item-id })
+  (if (is-valid-item-id item-id)
+    (map-get? items { item-id: item-id })
+    none
+  )
 )
 
 (define-read-only (get-discount-tier (item-id uint) (quantity uint))
   ;; Find the applicable discount tier
-  (default-to 
+  (if (and (is-valid-item-id item-id) (is-valid-quantity quantity))
+    (default-to 
+      { discount-percentage: u0 }
+      (map-get? discount-tiers { item-id: item-id, min-quantity: quantity })
+    )
     { discount-percentage: u0 }
-    (map-get? discount-tiers { item-id: item-id, min-quantity: quantity })
   )
 )
 
 (define-read-only (calculate-discounted-price (item-id uint) (quantity uint))
-  (let ((item-optional (get-item item-id)))
-    (if (is-none item-optional)
-      (err ERR-ITEM-NOT-FOUND)
-      (let 
-        ((item-value (unwrap-panic item-optional))
-         (base-price (get base-price item-value))
-         (discount-info (get-discount-tier item-id quantity))
-         (discount-percentage (get discount-percentage discount-info))
-         (discount-factor (- u100 discount-percentage))
-         (total-base-price (* base-price quantity))
-         (discounted-price (/ (* total-base-price discount-factor) u100)))
-        
-        (ok { 
-          base-price: base-price,
-          quantity: quantity,
-          discount-percentage: discount-percentage, 
-          final-price: discounted-price 
-        })
+  (if (and (is-valid-item-id item-id) (is-valid-quantity quantity))
+    (let ((item-optional (get-item item-id)))
+      (if (is-none item-optional)
+        (err ERR-ITEM-NOT-FOUND)
+        (let 
+          ((item-value (unwrap-panic item-optional))
+           (base-price (get base-price item-value))
+           (discount-info (get-discount-tier item-id quantity))
+           (discount-percentage (get discount-percentage discount-info))
+           (discount-factor (- u100 discount-percentage))
+           (total-base-price (* base-price quantity))
+           (discounted-price (/ (* total-base-price discount-factor) u100)))
+          
+          (ok { 
+            base-price: base-price,
+            quantity: quantity,
+            discount-percentage: discount-percentage, 
+            final-price: discounted-price 
+          })
+        )
       )
     )
+    (err ERR-INVALID-PARAM)
   )
 )
 
@@ -101,9 +133,12 @@
 
 ;; Private helper functions for error checking
 (define-private (check-item-exists (item-id uint))
-  (if (is-some (get-item item-id))
-    (ok true)
-    (err ERR-ITEM-NOT-FOUND)
+  (if (is-valid-item-id item-id)
+    (if (is-some (get-item item-id))
+      (ok true)
+      (err ERR-ITEM-NOT-FOUND)
+    )
+    (err ERR-INVALID-PARAM)
   )
 )
 
@@ -113,7 +148,11 @@
     ;; Check authorization and contract state
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (asserts! (not (var-get contract-locked)) ERR-CONTRACT-LOCKED)
-    (asserts! (> base-price u0) ERR-INVALID-PRICE)
+    
+    ;; Validate the inputs
+    (asserts! (is-valid-name name) ERR-INVALID-NAME)
+    (asserts! (is-valid-price base-price) ERR-INVALID-PRICE)
+    (asserts! (is-valid-quantity initial-quantity) ERR-INVALID-QUANTITY)
     
     ;; Add the new item
     (let ((new-item-id (var-get next-item-id)))
@@ -141,6 +180,10 @@
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (asserts! (not (var-get contract-locked)) ERR-CONTRACT-LOCKED)
     
+    ;; Validate the inputs
+    (asserts! (is-valid-item-id item-id) ERR-INVALID-PARAM)
+    (asserts! (is-valid-quantity new-quantity) ERR-INVALID-QUANTITY)
+    
     ;; First check if the item exists
     (unwrap! (check-item-exists item-id) ERR-ITEM-NOT-FOUND)
     
@@ -160,7 +203,10 @@
     ;; Check authorization and contract state
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (asserts! (not (var-get contract-locked)) ERR-CONTRACT-LOCKED)
-    (asserts! (> new-price u0) ERR-INVALID-PRICE)
+    
+    ;; Validate the inputs
+    (asserts! (is-valid-item-id item-id) ERR-INVALID-PARAM)
+    (asserts! (is-valid-price new-price) ERR-INVALID-PRICE)
     
     ;; First check if the item exists
     (unwrap! (check-item-exists item-id) ERR-ITEM-NOT-FOUND)
@@ -182,12 +228,13 @@
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (asserts! (not (var-get contract-locked)) ERR-CONTRACT-LOCKED)
     
+    ;; Validate the inputs
+    (asserts! (is-valid-item-id item-id) ERR-INVALID-PARAM)
+    (asserts! (is-valid-quantity min-quantity) ERR-INVALID-QUANTITY)
+    (asserts! (is-valid-discount discount-percentage) ERR-INVALID-DISCOUNT)
+    
     ;; First check if the item exists
     (unwrap! (check-item-exists item-id) ERR-ITEM-NOT-FOUND)
-    
-    ;; Validate the inputs
-    (asserts! (> min-quantity u0) ERR-INVALID-QUANTITY)
-    (asserts! (<= discount-percentage u100) ERR-INVALID-DISCOUNT)
     
     ;; Set the discount tier
     (map-set discount-tiers
@@ -205,6 +252,10 @@
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (asserts! (not (var-get contract-locked)) ERR-CONTRACT-LOCKED)
     
+    ;; Validate the inputs
+    (asserts! (is-valid-item-id item-id) ERR-INVALID-PARAM)
+    (asserts! (is-valid-quantity min-quantity) ERR-INVALID-QUANTITY)
+    
     ;; Delete the discount tier
     (map-delete discount-tiers { item-id: item-id, min-quantity: min-quantity })
     
@@ -216,7 +267,10 @@
   (begin
     ;; Validate the purchase
     (asserts! (not (var-get contract-locked)) ERR-CONTRACT-LOCKED)
-    (asserts! (> quantity u0) ERR-INVALID-QUANTITY)
+    
+    ;; Validate the inputs
+    (asserts! (is-valid-item-id item-id) ERR-INVALID-PARAM)
+    (asserts! (is-valid-quantity quantity) ERR-INVALID-QUANTITY)
     
     ;; First check if the item exists
     (unwrap! (check-item-exists item-id) ERR-ITEM-NOT-FOUND)
@@ -281,57 +335,70 @@
   (purchase { item-id: uint, quantity: uint })
   (purchase-id uint))
   
-  (let ((item-id (get item-id purchase))
-        (quantity (get quantity purchase)))
-  
-    ;; Get the item
-    (let ((item-value (unwrap-panic (get-item item-id))))
-      (let ((name (get name item-value))
-            (base-price (get base-price item-value))
-            (available-quantity (get available-quantity item-value))
-            (price-result (calculate-discounted-price item-id quantity)))
-        
-        ;; Calculate price
-        (let ((price-info (unwrap-panic price-result))
-              (final-price (get final-price price-info))
-              (discount-percentage (get discount-percentage price-info)))
-            
-            ;; Update the item's available quantity
-            (map-set items
-              { item-id: item-id }
-              { 
-                name: name,
-                base-price: base-price,
-                available-quantity: (- available-quantity quantity) 
-              }
-            )
-            
-            ;; Record the purchase
-            (map-set purchase-history
-              { buyer: tx-sender, purchase-id: purchase-id }
+  (if (and 
+        (is-valid-item-id (get item-id purchase))
+        (is-valid-quantity (get quantity purchase)))
+    (let ((item-id (get item-id purchase))
+          (quantity (get quantity purchase)))
+    
+      ;; Get the item
+      (let ((item-value (unwrap-panic (get-item item-id))))
+        (let ((name (get name item-value))
+              (base-price (get base-price item-value))
+              (available-quantity (get available-quantity item-value))
+              (price-result (calculate-discounted-price item-id quantity)))
+          
+          ;; Calculate price
+          (let ((price-info (unwrap-panic price-result))
+                (final-price (get final-price price-info))
+                (discount-percentage (get discount-percentage price-info)))
+              
+              ;; Update the item's available quantity
+              (map-set items
+                { item-id: item-id }
+                { 
+                  name: name,
+                  base-price: base-price,
+                  available-quantity: (- available-quantity quantity) 
+                }
+              )
+              
+              ;; Record the purchase
+              (map-set purchase-history
+                { buyer: tx-sender, purchase-id: purchase-id }
+                {
+                  item-id: item-id,
+                  quantity: quantity,
+                  price-paid: final-price,
+                  timestamp: block-height
+                }
+              )
+              
+              ;; Update contract statistics
+              (var-set total-revenue (+ (var-get total-revenue) final-price))
+              (var-set purchase-count (+ (var-get purchase-count) u1))
+              
+              ;; Return purchase info
               {
+                purchase-id: purchase-id,
                 item-id: item-id,
+                name: name,
                 quantity: quantity,
                 price-paid: final-price,
-                timestamp: block-height
-              }
-            )
-            
-            ;; Update contract statistics
-            (var-set total-revenue (+ (var-get total-revenue) final-price))
-            (var-set purchase-count (+ (var-get purchase-count) u1))
-            
-            ;; Return purchase info
-            {
-              purchase-id: purchase-id,
-              item-id: item-id,
-              name: name,
-              quantity: quantity,
-              price-paid: final-price,
-              discount-percentage: discount-percentage
-            })
+                discount-percentage: discount-percentage
+              })
+        )
       )
     )
+    ;; Return an empty purchase record for invalid input (this should not happen due to prior validation)
+    {
+      purchase-id: u0,
+      item-id: u0,
+      name: "",
+      quantity: u0,
+      price-paid: u0,
+      discount-percentage: u0
+    }
   )
 )
 
@@ -347,20 +414,26 @@
   (purchase { item-id: uint, quantity: uint })
   (accumulated-price uint))
   
-  (let ((item-id (get item-id purchase))
-        (quantity (get quantity purchase)))
-    
-    ;; Calculate price with discounts
-    (let ((price-result (calculate-discounted-price item-id quantity)))
-      (if (is-ok price-result)
-        (let ((price-info (unwrap-panic price-result))
-              (final-price (get final-price price-info)))
-          (+ accumulated-price final-price))
-        
-        ;; If calculation fails, just return the accumulated price
-        accumulated-price
+  (if (and 
+        (is-valid-item-id (get item-id purchase))
+        (is-valid-quantity (get quantity purchase)))
+    (let ((item-id (get item-id purchase))
+          (quantity (get quantity purchase)))
+      
+      ;; Calculate price with discounts
+      (let ((price-result (calculate-discounted-price item-id quantity)))
+        (if (is-ok price-result)
+          (let ((price-info (unwrap-panic price-result))
+                (final-price (get final-price price-info)))
+            (+ accumulated-price final-price))
+          
+          ;; If calculation fails, just return the accumulated price
+          accumulated-price
+        )
       )
     )
+    ;; Return accumulated price if inputs are invalid
+    accumulated-price
   )
 )
 
@@ -382,30 +455,35 @@
   (if (not valid)
     false
     
-    (let ((item-id (get item-id purchase))
-          (quantity (get quantity purchase)))
-      
-      ;; Check if item exists
-      (if (is-none (get-item item-id))
-        false
+    (if (and 
+          (is-valid-item-id (get item-id purchase))
+          (is-valid-quantity (get quantity purchase)))
+      (let ((item-id (get item-id purchase))
+            (quantity (get quantity purchase)))
         
-        (let ((item-value (unwrap-panic (get-item item-id)))
-              (available-quantity (get available-quantity (unwrap-panic (get-item item-id)))))
+        ;; Check if item exists
+        (if (is-none (get-item item-id))
+          false
           
-          ;; Check quantity constraints
-          (if (or (<= quantity u0) (< available-quantity quantity))
-            false
+          (let ((item-value (unwrap-panic (get-item item-id)))
+                (available-quantity (get available-quantity (unwrap-panic (get-item item-id)))))
             
-            ;; Check price calculation
-            (let ((price-result (calculate-discounted-price item-id quantity)))
-              (if (is-err price-result)
-                false
-                true
+            ;; Check quantity constraints
+            (if (< available-quantity quantity)
+              false
+              
+              ;; Check price calculation
+              (let ((price-result (calculate-discounted-price item-id quantity)))
+                (if (is-err price-result)
+                  false
+                  true
+                )
               )
             )
           )
         )
       )
+      false
     )
   )
 )
@@ -454,7 +532,7 @@
   )
 )
 
-;; Completely rewritten bulk purchase function with consistent return type
+;; Bulk purchase function with consistent return type
 (define-public (bulk-purchase (purchases (list 10 { item-id: uint, quantity: uint })))
   (begin
     ;; Validate contract state
@@ -490,6 +568,7 @@
 (define-public (transfer-ownership (new-owner principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq new-owner tx-sender)) ERR-INVALID-PARAM) ;; Prevent transferring to self
     (var-set contract-owner new-owner)
     (ok true)
   )
